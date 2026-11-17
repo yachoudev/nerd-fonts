@@ -1,0 +1,102 @@
+name: Release UbuntuMono
+
+on:
+  workflow_dispatch:
+
+# Required to upload/replace an asset on an existing GitHub Release.
+permissions:
+  contents: write
+
+jobs:
+  release-ubuntumono:
+    name: Build and publish UbuntuMono.zip
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Find the latest published release in this repository
+        id: latest
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          TAG="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq '.tag_name')"
+
+          if [[ -z "${TAG}" || "${TAG}" == "null" ]]; then
+            echo "::error::No published, non-draft, non-prerelease release was found in ${GITHUB_REPOSITORY}."
+            exit 1
+          fi
+
+          VERSION="${TAG#v}"
+          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+
+          echo "Using this repository's latest release: ${TAG}"
+
+      - name: Check out the release tag
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.latest.outputs.tag }}
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            python3-fontforge \
+            fuse \
+            jq \
+            xz-utils \
+            zip
+
+      - name: Download and configure FontForge
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location \
+            "https://github.com/fontforge/fontforge/releases/download/20230101/FontForge-2023-01-01-a1dad3e-x86_64.AppImage" \
+            --output "${GITHUB_WORKSPACE}/fontforge"
+          chmod +x "${GITHUB_WORKSPACE}/fontforge"
+          echo "${GITHUB_WORKSPACE}" >> "${GITHUB_PATH}"
+          "${GITHUB_WORKSPACE}/fontforge" --version
+
+      - name: Prepare Nerd Fonts release version
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.latest.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/bin/scripts"
+          ./version-bump.sh "${RELEASE_VERSION}"
+          ./generate-css.sh
+          jq . "${GITHUB_WORKSPACE}/glyphnames.json" > /dev/null
+
+      - name: Patch Ubuntu Mono only
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/bin/scripts"
+          fontforge --script "${GITHUB_WORKSPACE}/font-patcher" --version
+          ./gotta-patch-em-all-font-patcher\!.sh -jp "/UbuntuMono"
+
+      - name: Create UbuntuMono archives
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.latest.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/bin/scripts"
+          ./archive-fonts.sh UbuntuMono
+
+          test -s "${GITHUB_WORKSPACE}/archives/UbuntuMono.zip"
+
+      - name: Upload or replace UbuntuMono.zip on the existing release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.latest.outputs.tag }}
+          files: archives/UbuntuMono.zip
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          token: ${{ secrets.GITHUB_TOKEN }}
